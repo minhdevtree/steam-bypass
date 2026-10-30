@@ -674,6 +674,7 @@ namespace SteamBypass
             menu.Items.Add("Open", null, delegate { ShowWindow(); });
             menu.Items.Add(miToggle);
             menu.Items.Add("Test connection", null, delegate { TestConnection(); });
+            menu.Items.Add("Restart Steam", null, delegate { RestartSteam(); });
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Exit", null, delegate { ExitApp(); });
             tray.ContextMenuStrip = menu;
@@ -688,7 +689,7 @@ namespace SteamBypass
             var h = Handle; // create the handle now so background threads can BeginInvoke while hidden
             SystemProxy.Restore(); // clean up after a previous crash
             ApplyUi();
-            if (settings.AutoOn || forceOn) TurnOn();
+            if (settings.AutoOn || forceOn) TurnOn(false);
         }
 
         protected override void SetVisibleCore(bool value)
@@ -738,7 +739,7 @@ namespace SteamBypass
             UpdateStats();
         }
 
-        void TurnOn()
+        void TurnOn(bool interactive)
         {
             try
             {
@@ -746,7 +747,6 @@ namespace SteamBypass
                 SystemProxy.Apply(ProxyServer.PacUrl);
                 isOn = true;
                 Append("ON - proxy 127.0.0.1:" + ProxyServer.Port + ", Windows PAC set for Steam domains.");
-                Append("Restart Steam / reload the browser tab if it was already open.");
             }
             catch (Exception ex)
             {
@@ -755,6 +755,61 @@ namespace SteamBypass
                 Append("ERROR: " + ex.Message + (ex is SocketException ? "  (is port " + ProxyServer.Port + " in use?)" : ""));
             }
             ApplyUi();
+            if (!isOn) return;
+
+            // steam.exe reads the proxy settings only when it starts, so a Steam that was already open stays offline
+            if (SteamRunning())
+            {
+                Append("Steam is already running. If it shows NO CONNECTION, restart it (tray menu > Restart Steam).");
+                if (interactive &&
+                    MessageBox.Show(this, "Steam is already running. It only picks up the bypass when it starts, so if it was opened before this, it will stay offline.\n\nRestart Steam now? (Downloads resume automatically.)",
+                        "Steam Bypass", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                    RestartSteam();
+                else if (!interactive)
+                    tray.ShowBalloonTip(5000, "Steam Bypass", "Steam was already open. Use 'Restart Steam' in the tray menu so it uses the bypass.", ToolTipIcon.Warning);
+            }
+            else Append("Reload the browser tab if it was already open.");
+        }
+
+        static bool SteamRunning()
+        {
+            return Process.GetProcessesByName("steam").Length > 0;
+        }
+
+        static string FindSteamExe()
+        {
+            try
+            {
+                using (var k = Registry.CurrentUser.OpenSubKey(@"Software\Valve\Steam"))
+                {
+                    var exe = k.GetValue("SteamExe") as string;
+                    if (!string.IsNullOrEmpty(exe) && File.Exists(exe)) return exe;
+                    var dir = k.GetValue("SteamPath") as string;
+                    if (!string.IsNullOrEmpty(dir) && File.Exists(Path.Combine(dir, "steam.exe"))) return Path.Combine(dir, "steam.exe");
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        async void RestartSteam()
+        {
+            var exe = FindSteamExe();
+            if (exe == null) { Append("Could not find the Steam installation."); return; }
+            Append("Restarting Steam ...");
+            string err = await Task.Run(() =>
+            {
+                try
+                {
+                    Process.Start(exe, "-shutdown");
+                    for (int i = 0; i < 40 && (Process.GetProcessesByName("steam").Length > 0 || Process.GetProcessesByName("steamwebhelper").Length > 0); i++)
+                        Thread.Sleep(1000);
+                    Process.Start(exe);
+                    return (string)null;
+                }
+                catch (Exception ex) { return ex.Message; }
+            });
+            Append(err == null ? "Steam restarted." : "Could not restart Steam: " + err);
         }
 
         void TurnOff()
@@ -768,7 +823,7 @@ namespace SteamBypass
 
         void Toggle()
         {
-            if (isOn) TurnOff(); else TurnOn();
+            if (isOn) TurnOff(); else TurnOn(true);
         }
 
         async void TestConnection()

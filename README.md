@@ -90,13 +90,13 @@ Ports `127.0.0.1:18081` and `127.0.0.1:80` must be free. Stop any local web serv
 
 1. Run `SteamBypass.exe`. A round **S** icon appears in the tray (grey = off, green = on).
 2. Click **Turn ON**.
-3. Reload the browser tab. **Restart the Steam client** if it was already open.
+3. Reload the browser tab. If the Steam client was already open, the app offers to **restart Steam** (also available in the tray menu): `steam.exe` reads the Windows proxy settings only when it starts, so a Steam opened *before* the bypass was turned on shows `NO CONNECTION` and cannot sign in or use the store.
 4. Click **Test connection** at any time. It requests the store, community, a static-content host and a CDN host and shows the HTTP status of each. `OK  HTTP ...` means reachable.
 
 | Control | Effect |
 |---|---|
 | Left-click tray icon | Open the window |
-| Right-click tray icon | Open / Turn ON-OFF / Test connection / Exit |
+| Right-click tray icon | Open / Turn ON-OFF / Test connection / Restart Steam / Exit |
 | Close button (X) | Hide to tray; the bypass keeps running |
 | Exit (tray menu) | Turn the bypass off, restore Windows proxy settings, quit |
 | *Turn on when app starts* | Enables the bypass as soon as the app launches |
@@ -193,6 +193,7 @@ and `Get-NetTCPConnection` showed the client stuck in `SynSent` to `127.0.0.1:80
 | Windows still points at the proxy after a crash | Run `SteamBypass.exe --off` |
 | *Test connection* shows `BLOCKED` | Look at `steam-bypass.log` next to the `.exe`. Errors such as `DNS failed` mean DoH is unreachable; `cannot connect` means the upstream IP is blocked. |
 | Log shows "cannot listen on 127.0.0.1:80" | Another program uses port 80. Stop it, or run `netstat -ano \| findstr :80`. |
+| Steam shows `NO CONNECTION`, the store says "error communicating with the Steam servers", or *Add to Account* does nothing | Steam was started before the bypass was turned on. Use **tray menu → Restart Steam** (or exit Steam and start it again while the bypass is ON). |
 | Steam downloads stay at `0 B/s` | Make sure the app is **ON**, then restart Steam or press the retry button on the stalled download. Check that `Resolve-DnsName cache8-hkg1.steamcontent.com` returns `127.0.0.1` (your DNS must be the ISP one). |
 | A browser still cannot reach Steam | Reload after turning ON. Browsers cache PAC results briefly; if needed, restart it. |
 | Antivirus warning | The `.exe` is unsigned and you built it yourself; it opens local sockets and edits `HKCU` proxy settings. Review `app/SteamBypass.cs` (about 800 lines) before running it. |
