@@ -1,0 +1,12 @@
+# build output
+SteamBypass.exe
+
+# runtime files
+steam-bypass.log
+settings.ini
+
+# old GoodbyeDPI experiment (third-party binaries, superseded)
+legacy-goodbyedpi/
+bin/
+state.json
+last-run.log
