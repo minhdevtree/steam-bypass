@@ -1,0 +1,16 @@
+# Domains routed through the bypass proxy (a domain also covers its subdomains).
+steampowered.com
+steamcommunity.com
+steamstatic.com
+steamcontent.com
+steamusercontent.com
+steamserver.net
+steamgames.com
+steam-chat.com
+steamcdn-a.akamaihd.net
+steamcommunity-a.akamaihd.net
+steamuserimages-a.akamaihd.net
+steamvideo-a.akamaihd.net
+steampipe.akamaized.net
+valvesoftware.com
+steamdeck.com
