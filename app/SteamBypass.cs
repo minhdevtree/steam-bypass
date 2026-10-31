@@ -157,6 +157,14 @@ namespace SteamBypass
     }
 
     // ---------------------------------------------------------------- resolver
+    // No IPv4 address found. Steam probes IPv6-only names (ipv6check-*) on purpose; that is not an error.
+    class DnsMissException : Exception
+    {
+        public readonly string Host;
+        public DnsMissException(string host) : base("DNS failed for " + host) { Host = host; }
+        public bool Expected { get { return Host.StartsWith("ipv6check", StringComparison.OrdinalIgnoreCase); } }
+    }
+
     class Resolver
     {
         class Entry { public IPAddress[] Ips; public DateTime Expires; }
@@ -185,7 +193,7 @@ namespace SteamBypass
                 var good = new List<IPAddress>();
                 foreach (var a in sys)
                     if (!IPAddress.IsLoopback(a) && !a.Equals(IPAddress.Any) && !a.Equals(IPAddress.IPv6Any)) good.Add(a);
-                if (good.Count == 0) throw new Exception("DNS failed for " + host);
+                if (good.Count == 0) throw new DnsMissException(host);
                 res = new Entry { Ips = good.ToArray(), Expires = DateTime.UtcNow.AddSeconds(60) };
             }
             lock (cache) cache[host] = res;
@@ -361,6 +369,11 @@ namespace SteamBypass
                     await Task.WhenAll(Pump(cs, us, client, upstream), Pump(us, cs, upstream, client)).ConfigureAwait(false);
                 }
             }
+            catch (DnsMissException dex)
+            {
+                if (dex.Expected) Note(dex.Host, "no IPv4 address (expected for Steam's IPv6 check)");
+                else { Interlocked.Increment(ref Failed); Log("error: " + dex.Message); }
+            }
             catch (Exception ex)
             {
                 Interlocked.Increment(ref Failed);
@@ -535,6 +548,11 @@ namespace SteamBypass
                 }
                 if (up != null) try { up.Client.Shutdown(SocketShutdown.Send); } catch { }
                 if (respPump != null) await Task.WhenAny(respPump, Task.Delay(30000)).ConfigureAwait(false);
+            }
+            catch (DnsMissException dex)
+            {
+                if (dex.Expected) Note(dex.Host, "no IPv4 address (expected for Steam's IPv6 check)");
+                else { Interlocked.Increment(ref Failed); Log("error (loopback:80): " + dex.Message); }
             }
             catch (Exception ex)
             {
