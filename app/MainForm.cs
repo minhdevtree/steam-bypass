@@ -32,15 +32,48 @@ namespace SteamBypass
         public override Color ImageMarginGradientBegin { get { return Theme.Card; } }
         public override Color ImageMarginGradientMiddle { get { return Theme.Card; } }
         public override Color ImageMarginGradientEnd { get { return Theme.Card; } }
-        public override Color MenuBorder { get { return Theme.CardBorder; } }
+        public override Color MenuBorder { get { return Theme.Border; } }
         public override Color MenuItemBorder { get { return Theme.RaisedHover; } }
         public override Color MenuItemSelected { get { return Theme.RaisedHover; } }
         public override Color MenuItemSelectedGradientBegin { get { return Theme.RaisedHover; } }
         public override Color MenuItemSelectedGradientEnd { get { return Theme.RaisedHover; } }
         public override Color MenuItemPressedGradientBegin { get { return Theme.RaisedHover; } }
         public override Color MenuItemPressedGradientEnd { get { return Theme.RaisedHover; } }
-        public override Color SeparatorDark { get { return Theme.CardBorder; } }
+        public override Color SeparatorDark { get { return Theme.Border; } }
         public override Color SeparatorLight { get { return Theme.Card; } }
+    }
+
+    // Asks Windows whether steam.exe holds a connection to our proxy port. A Steam that was opened
+    // before the bypass was turned on never does: it read the proxy settings at startup.
+    static class SteamLink
+    {
+        [DllImport("iphlpapi.dll", SetLastError = true)]
+        static extern uint GetExtendedTcpTable(IntPtr table, ref int size, bool order, int af, int tableClass, uint reserved);
+
+        public static bool UsesProxy(ICollection<int> pids, int port)
+        {
+            int size = 0;
+            GetExtendedTcpTable(IntPtr.Zero, ref size, false, 2, 5, 0);   // AF_INET, TCP_TABLE_OWNER_PID_ALL
+            if (size <= 0) return false;
+            IntPtr buf = Marshal.AllocHGlobal(size);
+            try
+            {
+                if (GetExtendedTcpTable(buf, ref size, false, 2, 5, 0) != 0) return false;
+                int n = Marshal.ReadInt32(buf);
+                IntPtr row = IntPtr.Add(buf, 4);
+                for (int i = 0; i < n; i++, row = IntPtr.Add(row, 24))
+                {
+                    int state = Marshal.ReadInt32(row, 0);
+                    int remoteAddr = Marshal.ReadInt32(row, 12);
+                    int remotePortNet = Marshal.ReadInt32(row, 16);
+                    int pid = Marshal.ReadInt32(row, 20);
+                    int remotePort = ((remotePortNet & 0xFF) << 8) | ((remotePortNet >> 8) & 0xFF);
+                    if (state == 5 && remoteAddr == 0x0100007F && remotePort == port && pids.Contains(pid)) return true;
+                }
+            }
+            finally { Marshal.FreeHGlobal(buf); }
+            return false;
+        }
     }
 
     class MainForm : Form
@@ -51,6 +84,11 @@ namespace SteamBypass
         static extern int SetWindowTheme(IntPtr hWnd, string subAppName, string subIdList);
 
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+
+        // Dev preview (screenshots): no tray icon, no registry, no sockets, no log file.
+        internal static bool PreviewMode;
+
+        enum SteamState { NotRunning, Starting, Using, NeedsRestart, RunningOff }
 
         static readonly CheckSpec[] Specs = {
             new CheckSpec { Title = "Store", Subtitle = "store.steampowered.com", Url = "https://store.steampowered.com/", UseProxy = true },
@@ -69,14 +107,19 @@ namespace SteamBypass
         Icon iconOn, iconOff;
 
         PowerButton power;
-        Label lblState, lblHint, lblCheckHint;
-        StatTile tActive, tTotal, tErrors;
-        FlatButton btnTest, btnRestart;
+        Label lblState, lblHint, lblCheckSub;
+        StatStrip stats;
+        SteamStatus steamStatus;
+        FlatButton btnTest, btnSteam;
         CheckRow[] rows;
         ToggleSwitch swAuto, swWin;
         RichTextBox log;
 
         bool isOn, testing, restarting, reallyExit, startHidden, loading = true;
+        string startError;            // why the last attempt to turn on failed, or null
+        DateTime onSince;
+        int steamOverride = -1;       // preview only
+        SteamState steamState = SteamState.NotRunning;
 
         public MainForm(string dir, bool hidden, bool forceOn)
         {
@@ -88,15 +131,16 @@ namespace SteamBypass
             domains = new DomainSet(dir);
             proxy = new ProxyServer(domains);
             proxy.Log = Append;
+            proxy.Verbose = AppendFile;
 
-            iconOn = MakeIcon(Theme.Green);
-            iconOff = MakeIcon(Theme.Off);
+            iconOn = MakeIcon(Theme.GreenDeep);
+            iconOff = MakeIcon(Theme.Stroke);
 
             Text = "Steam Bypass";
             Icon = iconOff;
             BackColor = Theme.Bg;
             ForeColor = Theme.Text;
-            Font = Theme.F(9f);
+            Font = Theme.F(Theme.TBody);
             AutoScaleMode = AutoScaleMode.None;
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false;
@@ -107,19 +151,22 @@ namespace SteamBypass
             BuildUi();
             BuildTray();
 
-            poll.Interval = 1000;
-            poll.Tick += delegate { UpdateStats(); };
-            poll.Start();
+            if (!PreviewMode)
+            {
+                poll.Interval = 1000;
+                poll.Tick += delegate { if (Visible) { UpdateStats(); UpdateSteam(); } };
+                poll.Start();
+            }
 
             swAuto.SetCheckedSilently(settings.AutoOn);
-            swWin.SetCheckedSilently(GetRunAtLogon());
+            swWin.SetCheckedSilently(PreviewMode ? true : GetRunAtLogon());
             loading = false;
 
             var h = Handle; // create the handle now so background threads can BeginInvoke while hidden
-            SystemProxy.Restore(); // clean up after a previous crash
+            if (!PreviewMode) SystemProxy.Restore(); // clean up after a previous crash
             ApplyUi();
-            Append("Ready. Click the power button to turn the bypass on.");
-            if (settings.AutoOn || forceOn) TurnOn(false);
+            Append("Ready.");
+            if (!PreviewMode && (settings.AutoOn || forceOn)) TurnOn(false);
         }
 
         // ------------------------------------------------------------------ layout
@@ -130,103 +177,115 @@ namespace SteamBypass
             var l = new Label
             {
                 Text = text, Font = font, ForeColor = color, TextAlign = align, AutoSize = false,
-                Bounds = new Rectangle(S(x), S(y), S(w), S(h)), BackColor = parent.BackColor
+                Bounds = new Rectangle(S(x), S(y), S(w), S(h)), BackColor = parent.BackColor, UseMnemonic = false
             };
             parent.Controls.Add(l);
             return l;
         }
 
+        static void Divider(Control parent, int x, int y, int w)
+        {
+            parent.Controls.Add(new Panel { Bounds = new Rectangle(S(x), S(y), S(w), 1), BackColor = Theme.Border });
+        }
+
         void BuildUi()
         {
-            // ---- left column
+            // ---- left column: one card with the power button, the figures and the Steam row
             const int lx = 20, lw = 300;
-            var logo = new Logo { Bounds = new Rectangle(S(lx), S(20), S(40), S(40)) };
-            Controls.Add(logo);
-            MakeLabel(this, "Steam Bypass", Theme.Semi(15f), Theme.Text, lx + 52, 18, 240, 26, ContentAlignment.MiddleLeft);
-            MakeLabel(this, "Reach Steam on restricted networks", Theme.F(8.5f), Theme.Muted, lx + 52, 42, 248, 18, ContentAlignment.MiddleLeft);
+            Controls.Add(new Logo { Bounds = new Rectangle(S(lx), S(20), S(40), S(40)), AccessibleName = "Steam Bypass", AccessibleRole = AccessibleRole.Graphic });
+            MakeLabel(this, "Steam Bypass", Theme.Semi(Theme.TValue), Theme.Text, lx + 52, 17, 240, 26, ContentAlignment.MiddleLeft);
+            MakeLabel(this, "Reach Steam on restricted networks", Theme.F(Theme.TMeta), Theme.Muted, lx + 52, 42, 248, 18, ContentAlignment.MiddleLeft);
 
-            var hero = new Card { Bounds = new Rectangle(S(lx), S(80), S(lw), S(292)) };
+            var hero = new Card { Bounds = new Rectangle(S(lx), S(80), S(lw), S(428)) };
             Controls.Add(hero);
-            power = new PowerButton { Bounds = new Rectangle((S(lw) - S(150)) / 2, S(16), S(150), S(150)) };
+            power = new PowerButton { Bounds = new Rectangle((S(lw) - S(176)) / 2, S(8), S(176), S(176)) };
             power.Click += delegate { Toggle(); };
             hero.Controls.Add(power);
-            lblState = MakeLabel(hero, "Bypass is OFF", Theme.Semi(18f), Theme.Muted, 0, 176, lw, 36, ContentAlignment.MiddleCenter);
-            lblHint = MakeLabel(hero, "", Theme.F(9f), Theme.Muted, 26, 216, lw - 52, 60, ContentAlignment.TopCenter);
-
-            int gap = S(10);
-            int tw = (S(lw) - 2 * gap) / 3;
-            tActive = new StatTile { Caption = "Active", Bounds = new Rectangle(S(lx), S(384), tw, S(60)) };
-            tTotal = new StatTile { Caption = "Connections", Bounds = new Rectangle(S(lx) + tw + gap, S(384), tw, S(60)) };
-            tErrors = new StatTile { Caption = "Errors", Bounds = new Rectangle(S(lx) + 2 * (tw + gap), S(384), S(lw) - 2 * (tw + gap), S(60)) };
-            Controls.AddRange(new Control[] { tActive, tTotal, tErrors });
-
-            int bw = (S(lw) - gap) / 2;
-            btnTest = new FlatButton { Text = "Run test", Bounds = new Rectangle(S(lx), S(456), bw, S(52)) };
-            btnTest.Click += delegate { RunTest(); };
-            btnRestart = new FlatButton { Text = "Restart Steam", Bounds = new Rectangle(S(lx) + bw + gap, S(456), S(lw) - bw - gap, S(52)) };
-            btnRestart.Click += delegate { RestartSteam(); };
-            Controls.AddRange(new Control[] { btnTest, btnRestart });
+            lblState = MakeLabel(hero, "", Theme.Semi(Theme.TState), Theme.Text, 0, 184, lw, 32, ContentAlignment.MiddleCenter);
+            lblHint = MakeLabel(hero, "", Theme.F(Theme.TBody), Theme.Muted, 26, 220, lw - 52, 54, ContentAlignment.TopCenter);
+            Divider(hero, 16, 282, lw - 32);
+            stats = new StatStrip { Bounds = new Rectangle(S(0), S(283), S(lw), S(64)) };
+            hero.Controls.Add(stats);
+            Divider(hero, 16, 347, lw - 32);
+            steamStatus = new SteamStatus { Bounds = new Rectangle(S(20), S(361), S(168), S(56)) };
+            hero.Controls.Add(steamStatus);
+            btnSteam = new FlatButton { Text = "Restart", Compact = true, Bounds = new Rectangle(S(196), S(372), S(84), S(32)) };
+            btnSteam.Click += delegate { SteamAction(); };
+            hero.Controls.Add(btnSteam);
 
             // ---- right column
             const int rx = 340, rw = 380;
-            var check = new Card { Bounds = new Rectangle(S(rx), S(20), S(rw), S(206)) };
+            var check = new Card { Bounds = new Rectangle(S(rx), S(20), S(rw), S(220)) };
             Controls.Add(check);
-            MakeLabel(check, "Connection check", Theme.Semi(11f), Theme.Text, 18, 12, 200, 24, ContentAlignment.MiddleLeft);
-            lblCheckHint = MakeLabel(check, "Not run yet", Theme.F(8f), Theme.Muted, 190, 12, rw - 208, 24, ContentAlignment.MiddleRight);
+            MakeLabel(check, "Connection check", Theme.Semi(Theme.TTitle), Theme.Text, 18, 12, 220, 22, ContentAlignment.MiddleLeft);
+            lblCheckSub = MakeLabel(check, "Not run yet", Theme.F(Theme.TMeta), Theme.Faint, 18, 33, 220, 18, ContentAlignment.MiddleLeft);
+            btnTest = new FlatButton { Text = "Run test", Compact = true, Bounds = new Rectangle(S(rw - 18 - 88), S(14), S(88), S(32)) };
+            btnTest.Click += delegate { RunTest(); };
+            check.Controls.Add(btnTest);
             rows = new CheckRow[Specs.Length];
             for (int i = 0; i < Specs.Length; i++)
             {
-                rows[i] = new CheckRow { Title = Specs[i].Title, Subtitle = Specs[i].Subtitle, Bounds = new Rectangle(S(18), S(46 + i * 38), S(rw - 36), S(36)) };
+                rows[i] = new CheckRow { Title = Specs[i].Title, Subtitle = Specs[i].Subtitle, Bounds = new Rectangle(S(18), S(62 + i * 36), S(rw - 36), S(36)) };
+                rows[i].Set(CheckRow.St.Idle, "");
                 check.Controls.Add(rows[i]);
             }
 
-            var settingsCard = new Card { Bounds = new Rectangle(S(rx), S(238), S(rw), S(116)) };
+            var settingsCard = new Card { Bounds = new Rectangle(S(rx), S(254), S(rw), S(112)) };
             Controls.Add(settingsCard);
-            MakeLabel(settingsCard, "Turn on when app starts", Theme.F(9.5f), Theme.Text, 18, 10, 270, 22, ContentAlignment.MiddleLeft);
-            MakeLabel(settingsCard, "Enable the bypass as soon as this app opens", Theme.F(8f), Theme.Muted, 18, 31, 280, 18, ContentAlignment.MiddleLeft);
-            swAuto = new ToggleSwitch { Bounds = new Rectangle(S(rw - 18 - 44), S(18), S(44), S(24)) };
+            swAuto = AddSetting(settingsCard, rw, 0, "Turn on when the app starts", "Enable the bypass as soon as this app opens");
+            Divider(settingsCard, 18, 56, rw - 36);
+            swWin = AddSetting(settingsCard, rw, 56, "Start with Windows", "Open in the tray when you sign in");
             swAuto.CheckedChanged += delegate { if (!loading) { settings.AutoOn = swAuto.Checked; settings.Save(); } };
-            settingsCard.Controls.Add(swAuto);
-            settingsCard.Controls.Add(new Panel { Bounds = new Rectangle(S(18), S(58), S(rw - 36), 1), BackColor = Theme.CardBorder });
-            MakeLabel(settingsCard, "Start with Windows", Theme.F(9.5f), Theme.Text, 18, 66, 270, 22, ContentAlignment.MiddleLeft);
-            MakeLabel(settingsCard, "Launch minimized to the tray when you sign in", Theme.F(8f), Theme.Muted, 18, 87, 290, 18, ContentAlignment.MiddleLeft);
-            swWin = new ToggleSwitch { Bounds = new Rectangle(S(rw - 18 - 44), S(74), S(44), S(24)) };
             swWin.CheckedChanged += delegate { if (!loading) SetRunAtLogon(swWin.Checked); };
-            settingsCard.Controls.Add(swWin);
 
-            var act = new Card { Bounds = new Rectangle(S(rx), S(366), S(rw), S(142)) };
+            var act = new Card { Bounds = new Rectangle(S(rx), S(380), S(rw), S(128)) };
             Controls.Add(act);
-            MakeLabel(act, "Activity", Theme.Semi(11f), Theme.Text, 18, 10, 120, 24, ContentAlignment.MiddleLeft);
-            var clear = MakeLabel(act, "Clear", Theme.F(8.5f), Theme.Muted, rw - 18 - 60, 10, 60, 24, ContentAlignment.MiddleRight);
-            clear.Cursor = Cursors.Hand;
-            clear.MouseEnter += delegate { clear.ForeColor = Theme.Text; };
-            clear.MouseLeave += delegate { clear.ForeColor = Theme.Muted; };
+            MakeLabel(act, "Activity", Theme.Semi(Theme.TTitle), Theme.Text, 18, 8, 100, 24, ContentAlignment.MiddleLeft);
+            var clear = new TextAction { Text = "Clear", Bounds = new Rectangle(S(rw - 18 - 44), S(8), S(44), S(24)), BackColor = act.BackColor };
             clear.Click += delegate { log.Clear(); };
+            var open = new TextAction { Text = "Open log file", Bounds = new Rectangle(S(rw - 18 - 44 - 8 - 84), S(8), S(84), S(24)), BackColor = act.BackColor };
+            open.Click += delegate { OpenLogFile(); };
+            act.Controls.Add(clear);
+            act.Controls.Add(open);
             log = new RichTextBox
             {
-                Bounds = new Rectangle(S(18), S(38), S(rw - 32), S(142 - 38 - 12)),
+                Bounds = new Rectangle(S(18), S(34), S(rw - 36), S(128 - 34 - 10)),
                 BorderStyle = BorderStyle.None, BackColor = Theme.Card, ForeColor = Theme.Muted,
                 ReadOnly = true, DetectUrls = false, TabStop = false, ScrollBars = RichTextBoxScrollBars.Vertical,
-                Font = new Font("Consolas", 8.5f), WordWrap = true
+                Font = new Font("Consolas", 9f), WordWrap = true, AccessibleName = "Activity log"
             };
             act.Controls.Add(log);
             SetWindowTheme(log.Handle, "DarkMode_Explorer", null);
         }
 
+        // A settings row: label and one line of explanation on the left, switch on the right. Clicking
+        // the text flips the switch too, so the target is the whole row.
+        ToggleSwitch AddSetting(Card card, int cardWidth, int top, string title, string sub)
+        {
+            var sw = new ToggleSwitch { Bounds = new Rectangle(S(cardWidth - 18 - 44), S(top + 16), S(44), S(24)), AccessibleName = title };
+            var t = MakeLabel(card, title, Theme.F(Theme.TBody), Theme.Text, 18, top + 9, cardWidth - 100, 22, ContentAlignment.MiddleLeft);
+            var s = MakeLabel(card, sub, Theme.F(Theme.TMeta), Theme.Faint, 18, top + 30, cardWidth - 100, 18, ContentAlignment.MiddleLeft);
+            t.Cursor = s.Cursor = Cursors.Hand;
+            t.Click += delegate { sw.Checked = !sw.Checked; };
+            s.Click += delegate { sw.Checked = !sw.Checked; };
+            card.Controls.Add(sw);
+            return sw;
+        }
+
         void BuildTray()
         {
-            var menu = new ContextMenuStrip { Renderer = new ToolStripProfessionalRenderer(new DarkColors()), ShowImageMargin = false, Font = Theme.F(9f) };
+            var menu = new ContextMenuStrip { Renderer = new ToolStripProfessionalRenderer(new DarkColors()), ShowImageMargin = false, Font = Theme.F(Theme.TBody) };
             miToggle.Click += delegate { Toggle(); };
             menu.Items.Add("Open", null, delegate { ShowWindow(); });
             menu.Items.Add(miToggle);
             menu.Items.Add("Run test", null, delegate { RunTest(); });
-            menu.Items.Add("Restart Steam", null, delegate { RestartSteam(); });
+            menu.Items.Add("Restart Steam", null, delegate { SteamAction(); });
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Exit", null, delegate { ExitApp(); });
             foreach (ToolStripItem it in menu.Items) it.ForeColor = Theme.Text;
             tray.ContextMenuStrip = menu;
             tray.MouseClick += delegate(object s, MouseEventArgs e) { if (e.Button == MouseButtons.Left) ShowWindow(); };
-            tray.Visible = true;
+            tray.Visible = !PreviewMode;
         }
 
         static Icon MakeIcon(Color c)
@@ -259,19 +318,28 @@ namespace SteamBypass
         }
 
         // ------------------------------------------------------------------- state
+        string LogPath { get { return Path.Combine(dir, "steam-bypass.log"); } }
+
+        // File only: per-host detail that would drown the activity list.
+        void AppendFile(string s)
+        {
+            if (PreviewMode) return;
+            try { lock (dir) File.AppendAllText(LogPath, DateTime.Now.ToString("s") + "  " + s + "\r\n"); } catch { }
+        }
+
         void Append(string s)
         {
             if (IsDisposed) return;
-            try { lock (dir) File.AppendAllText(Path.Combine(dir, "steam-bypass.log"), DateTime.Now.ToString("s") + "  " + s + "\r\n"); } catch { }
+            AppendFile(s);
             if (InvokeRequired) { try { BeginInvoke(new Action<string>(Append), s); } catch { } return; }
             if (log == null) return;
-            Color c = Color.FromArgb(174, 185, 199);
+            Color c = Theme.Text;
             string low = s.ToLowerInvariant();
-            if (low.StartsWith("error") || low.Contains("warning") || low.Contains("cannot")) c = Theme.Red;
-            else if (s.StartsWith("ON ") || s.Contains("restarted") || s.StartsWith("Test passed")) c = Theme.Green;
-            else if (s.StartsWith("OFF")) c = Theme.Muted;
-            if (log.TextLength > 30000) log.Clear();
-            log.SelectionStart = log.TextLength; log.SelectionLength = 0; log.SelectionColor = Theme.Off;
+            if (low.StartsWith("error") || low.Contains("warning") || low.Contains("cannot") || low.Contains("couldn't")) c = Theme.Red;
+            else if (s.StartsWith("Turned on") || s.Contains("restarted") || s.StartsWith("Test passed")) c = Theme.Green;
+            else if (s.StartsWith("Turned off") || s == "Ready.") c = Theme.Muted;
+            if (log.TextLength > 20000) log.Clear();
+            log.SelectionStart = log.TextLength; log.SelectionLength = 0; log.SelectionColor = Theme.Faint;
             log.AppendText(DateTime.Now.ToString("HH:mm:ss") + "  ");
             log.SelectionStart = log.TextLength; log.SelectionLength = 0; log.SelectionColor = c;
             log.AppendText(s + "\n");
@@ -279,35 +347,110 @@ namespace SteamBypass
             log.ScrollToCaret();
         }
 
+        void OpenLogFile()
+        {
+            try { if (File.Exists(LogPath)) Process.Start(LogPath); else Append("There is no log file yet."); }
+            catch (Exception ex) { Append("Error: could not open the log file: " + ex.Message); }
+        }
+
         void UpdateStats()
         {
-            tActive.Value = isOn ? proxy.Active.ToString() : "-";
-            tTotal.Value = isOn ? proxy.Total.ToString() : "-";
-            tErrors.Value = isOn ? proxy.Failed.ToString() : "-";
-            tErrors.ValueColor = isOn && proxy.Failed > 0 ? Theme.Red : Theme.Text;
-            tActive.ValueColor = isOn && proxy.Active > 0 ? Theme.Green : Theme.Text;
+            // Counts since the app started; dimmed while the bypass is off, because nothing is moving.
+            stats.Set(0, proxy.Active.ToString(), !isOn ? Theme.Faint : proxy.Active > 0 ? Theme.Green : Theme.Text);
+            stats.Set(1, proxy.Total.ToString(), isOn ? Theme.Text : Theme.Faint);
+            stats.Set(2, proxy.Failed.ToString(), proxy.Failed > 0 ? Theme.Red : (isOn ? Theme.Text : Theme.Faint));
+        }
+
+        void UpdateSteam()
+        {
+            var state = SteamState.NotRunning;
+            if (steamOverride >= 0) state = (SteamState)steamOverride;
+            else
+            {
+                Process[] procs = Process.GetProcessesByName("steam");
+                if (procs.Length > 0)
+                {
+                    state = isOn ? SteamState.Starting : SteamState.RunningOff;
+                    if (isOn)
+                    {
+                        var pids = new HashSet<int>();
+                        DateTime oldest = DateTime.MaxValue;
+                        foreach (var p in procs)
+                        {
+                            pids.Add(p.Id);
+                            try { if (p.StartTime < oldest) oldest = p.StartTime; } catch { }
+                        }
+                        if (SteamLink.UsesProxy(pids, ProxyServer.Port)) state = SteamState.Using;
+                        else if (DateTime.Now - oldest > TimeSpan.FromSeconds(45) && DateTime.UtcNow - onSince > TimeSpan.FromSeconds(45))
+                            state = SteamState.NeedsRestart;
+                    }
+                }
+                foreach (var p in procs) p.Dispose();
+            }
+            steamState = state;
+
+            string text; Color color; string button = "Restart";
+            switch (state)
+            {
+                case SteamState.Using: text = "Using the bypass"; color = Theme.Green; break;
+                case SteamState.NeedsRestart: text = "Opened before the bypass. Restart it to connect."; color = Theme.Amber; break;
+                case SteamState.Starting: text = "Starting..."; color = Theme.Muted; break;
+                case SteamState.RunningOff: text = "Running"; color = Theme.Muted; break;
+                default: text = "Not running"; color = Theme.Muted; button = "Open"; break;
+            }
+            steamStatus.Set(text, color);
+            if (btnSteam.Text != button && !restarting) btnSteam.Text = button;
         }
 
         void ApplyUi()
         {
-            power.On = isOn;
-            lblState.Text = isOn ? "Bypass is ON" : "Bypass is OFF";
-            lblState.ForeColor = isOn ? Theme.Green : Theme.Muted;
-            lblHint.Text = isOn
-                ? "Steam traffic is routed through 127.0.0.1:" + ProxyServer.Port + ".\nKeep this app running while you use Steam."
-                : "Turn it on to reach Steam. Nothing on your PC is changed while it is off.";
+            power.State = startError != null ? PowerButton.Mode.Error : isOn ? PowerButton.Mode.On : PowerButton.Mode.Off;
+            power.AccessibleName = isOn ? "Bypass is on. Press to turn off." : "Bypass is off. Press to turn on.";
+
+            Color hintColor = Theme.Muted;
+            if (startError != null)
+            {
+                lblState.Text = "Couldn't turn on";
+                lblState.ForeColor = Theme.Red;
+                lblHint.Text = startError;
+            }
+            else if (isOn)
+            {
+                lblState.Text = "Bypass is on";
+                lblState.ForeColor = Theme.Green;
+                if (proxy.DownloadsError != null) { lblHint.Text = proxy.DownloadsError; hintColor = Theme.Amber; }
+                else lblHint.Text = "Steam traffic goes through this app. Keep it running while you use Steam.";
+            }
+            else
+            {
+                lblState.Text = "Bypass is off";
+                lblState.ForeColor = Theme.Text;
+                lblHint.Text = "Turn it on to reach Steam. Nothing on your PC changes while it is off.";
+            }
+            lblHint.ForeColor = hintColor;
+
             tray.Icon = isOn ? iconOn : iconOff;
-            tray.Text = isOn ? "Steam Bypass: ON" : "Steam Bypass: OFF";
-            miToggle.Text = isOn ? "Turn OFF" : "Turn ON";
+            tray.Text = isOn ? "Steam Bypass: on" : "Steam Bypass: off";
+            miToggle.Text = isOn ? "Turn off" : "Turn on";
             btnTest.Enabled = !testing;
-            btnRestart.Enabled = !restarting;
-            btnRestart.Text = restarting ? "Restarting..." : "Restart Steam";
+            btnTest.Text = testing ? "Testing..." : "Run test";
+            btnSteam.Enabled = !restarting;
+            if (restarting) btnSteam.Text = "Working...";
             UpdateStats();
+            UpdateSteam();
         }
 
         void Toggle()
         {
             if (isOn) TurnOff(); else TurnOn(true);
+        }
+
+        static string StartFailure(Exception ex)
+        {
+            var se = ex as SocketException;
+            if (se != null && se.SocketErrorCode == SocketError.AddressAlreadyInUse)
+                return "Port " + ProxyServer.Port + " is in use. Close the other program, or another copy of this app, then try again.";
+            return ex.Message;
         }
 
         void TurnOn(bool interactive)
@@ -317,28 +460,45 @@ namespace SteamBypass
                 proxy.Start();
                 SystemProxy.Apply(ProxyServer.PacUrl);
                 isOn = true;
-                Append("ON - proxy 127.0.0.1:" + ProxyServer.Port + ", Windows PAC set for Steam domains.");
+                startError = null;
+                onSince = DateTime.UtcNow;
+                Append("Turned on. Windows now sends Steam domains through this app.");
             }
             catch (Exception ex)
             {
                 proxy.Stop();
                 isOn = false;
-                Append("ERROR: " + ex.Message + (ex is SocketException ? "  (is port " + ProxyServer.Port + " in use?)" : ""));
+                startError = StartFailure(ex);
+                Append("Error: couldn't turn on: " + ex.Message);
             }
             ApplyUi();
-            if (!isOn) return;
+            if (!isOn)
+            {
+                Notify("Couldn't turn on", startError, ToastKind.Error, true);
+                return;
+            }
 
             // steam.exe reads the proxy settings only when it starts, so a Steam that was already open stays offline
-            if (SteamRunning())
+            if (SteamRunning() && steamState != SteamState.Using)
             {
-                Append("Steam is already running. If it shows NO CONNECTION, restart it (Restart Steam).");
                 if (interactive &&
-                    MessageBox.Show(this, "Steam is already running. It only picks up the bypass when it starts, so if it was opened before this, it will stay offline.\n\nRestart Steam now? (Downloads resume automatically.)",
+                    MessageBox.Show(this, "Steam is already running. It only picks up the bypass when it starts, so if it was opened before this, it will stay offline.\n\nRestart Steam now? Downloads resume automatically.",
                         "Steam Bypass", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
                     RestartSteam();
                 else if (!interactive)
-                    tray.ShowBalloonTip(5000, "Steam Bypass", "Steam was already open. Use 'Restart Steam' in the tray menu so it uses the bypass.", ToolTipIcon.Warning);
+                    Notify("Steam is already open", "Restart it from the tray menu so it uses the bypass.", ToastKind.Warning, true);
             }
+            else Notify("Bypass is on", "Steam traffic now goes through this app.", ToastKind.Success, false);
+            if (interactive) AutoTest();
+        }
+
+        // Shows an on-screen notice. Skipped while this window has focus (it already shows the state)
+        // unless the message must not be missed.
+        void Notify(string title, string detail, ToastKind kind, bool always)
+        {
+            if (PreviewMode || IsDisposed || reallyExit) return;
+            if (!always && ContainsFocus) return;
+            Toast.Flash(title, detail, kind);
         }
 
         void TurnOff()
@@ -346,8 +506,10 @@ namespace SteamBypass
             SystemProxy.Restore();
             proxy.Stop();
             isOn = false;
-            Append("OFF - proxy stopped, Windows proxy settings restored.");
+            startError = null;
+            Append("Turned off. Windows proxy settings restored.");
             ApplyUi();
+            Notify("Bypass is off", "Windows proxy settings are back to normal.", ToastKind.Info, false);
         }
 
         // ------------------------------------------------------------------- steam
@@ -372,6 +534,17 @@ namespace SteamBypass
             return null;
         }
 
+        // "Open" when Steam is closed, otherwise "Restart" after a confirmation (a running game would be closed).
+        void SteamAction()
+        {
+            if (restarting) return;
+            if (SteamRunning() &&
+                MessageBox.Show(this, "Restart Steam?\n\nDownloads resume automatically. Close any game you are playing first.",
+                    "Steam Bypass", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                return;
+            RestartSteam();
+        }
+
         async void RestartSteam()
         {
             if (restarting) return;
@@ -379,7 +552,7 @@ namespace SteamBypass
             if (exe == null) { Append("Error: could not find the Steam installation."); return; }
             restarting = true;
             ApplyUi();
-            Append("Restarting Steam ...");
+            Append(SteamRunning() ? "Restarting Steam..." : "Opening Steam...");
             string err = await Task.Run(() =>
             {
                 try
@@ -395,6 +568,8 @@ namespace SteamBypass
             restarting = false;
             Append(err == null ? "Steam restarted." : "Error: could not restart Steam: " + err);
             ApplyUi();
+            if (err == null) Notify("Steam restarted", "It will now use the bypass.", ToastKind.Success, false);
+            else Notify("Couldn't restart Steam", err, ToastKind.Error, true);
         }
 
         // -------------------------------------------------------------------- test
@@ -434,17 +609,24 @@ namespace SteamBypass
         {
             switch (ex.Status)
             {
-                case WebExceptionStatus.ConnectFailure: return "connection refused";
-                case WebExceptionStatus.Timeout: return "timed out";
+                case WebExceptionStatus.ConnectFailure: return "Connection refused";
+                case WebExceptionStatus.Timeout: return "Timed out";
                 case WebExceptionStatus.NameResolutionFailure: return "DNS failed";
-                case WebExceptionStatus.ProxyNameResolutionFailure: return "proxy not reachable";
+                case WebExceptionStatus.ProxyNameResolutionFailure: return "Proxy unreachable";
                 case WebExceptionStatus.ConnectionClosed:
                 case WebExceptionStatus.ReceiveFailure:
                 case WebExceptionStatus.SendFailure:
                 case WebExceptionStatus.SecureChannelFailure:
-                case WebExceptionStatus.UnknownError: return "blocked (reset)";
+                case WebExceptionStatus.UnknownError: return "Blocked (reset)";
                 default: return ex.Status.ToString();
             }
+        }
+
+        // Right after turning the bypass on: show that it works, without a second click.
+        async void AutoTest()
+        {
+            await Task.Delay(700);
+            if (isOn && !testing) RunTest();
         }
 
         async void RunTest()
@@ -453,9 +635,10 @@ namespace SteamBypass
             testing = true;
             ApplyUi();
             bool viaProxy = isOn;
-            lblCheckHint.Text = viaProxy ? "Testing through the bypass..." : "Testing directly (bypass is off)...";
+            lblCheckSub.Text = viaProxy ? "Through the bypass..." : "Directly (the bypass is off)...";
             foreach (var r in rows) r.Set(CheckRow.St.Running, "");
             int ok = 0;
+            var rowsOk = new bool[Specs.Length];
             var tasks = new List<Task>();
             for (int i = 0; i < Specs.Length; i++)
             {
@@ -463,15 +646,24 @@ namespace SteamBypass
                 tasks.Add(Task.Run(() => Probe(Specs[idx], viaProxy)).ContinueWith(t =>
                 {
                     var res = t.Result;
+                    rowsOk[idx] = res.Ok;
                     if (res.Ok) Interlocked.Increment(ref ok);
                     rows[idx].Set(res.Ok ? CheckRow.St.Ok : CheckRow.St.Fail, res.Detail);
                 }, TaskScheduler.FromCurrentSynchronizationContext()));
             }
             await Task.WhenAll(tasks);
             testing = false;
-            lblCheckHint.Text = (viaProxy ? "Via bypass" : "Direct") + " · " + DateTime.Now.ToString("HH:mm:ss");
-            Append((ok == Specs.Length ? "Test passed" : "Test result") + ": " + ok + "/" + Specs.Length + " reachable (" + (viaProxy ? "via bypass" : "direct") + ").");
+            lblCheckSub.Text = (viaProxy ? "Through the bypass" : "Directly") + " · " + DateTime.Now.ToString("HH:mm:ss");
+            Append((ok == Specs.Length ? "Test passed" : "Test finished") + ": " + ok + " of " + Specs.Length + " reachable (" + (viaProxy ? "through the bypass" : "directly") + ").");
             ApplyUi();
+            if (ok == Specs.Length)
+                Notify("Connection check passed", "All " + Specs.Length + " services are reachable" + (viaProxy ? " through the bypass." : "."), ToastKind.Success, false);
+            else
+            {
+                var failed = new List<string>();
+                for (int i = 0; i < Specs.Length; i++) if (!rowsOk[i]) failed.Add(Specs[i].Title);
+                Notify("Connection check failed", "Not reachable: " + string.Join(", ", failed.ToArray()) + ".", ToastKind.Error, false);
+            }
         }
 
         // ------------------------------------------------------------- housekeeping
@@ -509,8 +701,8 @@ namespace SteamBypass
 
         void ExitApp()
         {
-            if (isOn) TurnOff();
             reallyExit = true;
+            if (isOn) TurnOff();
             tray.Visible = false;
             tray.Dispose();
             Application.Exit();
@@ -518,14 +710,14 @@ namespace SteamBypass
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            if (!reallyExit && e.CloseReason == CloseReason.UserClosing)
+            if (!PreviewMode && !reallyExit && e.CloseReason == CloseReason.UserClosing)
             {
                 e.Cancel = true;
                 Hide();
-                tray.ShowBalloonTip(1500, "Steam Bypass", "Still running in the tray.", ToolTipIcon.Info);
+                Notify("Still running in the tray", isOn ? "The bypass stays on. Right-click the tray icon to quit." : "Right-click the tray icon to quit.", ToastKind.Info, true);
                 return;
             }
-            if (isOn) SystemProxy.Restore(); // Windows shutdown / forced close
+            if (isOn && !PreviewMode) SystemProxy.Restore(); // Windows shutdown / forced close
             base.OnFormClosing(e);
         }
     }

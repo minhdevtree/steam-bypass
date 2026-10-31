@@ -4,24 +4,32 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Text;
 using System.Windows.Forms;
 
-// Small owner-drawn control set for the dark UI. All sizes go through Theme.S() so the
-// window scales with the Windows display scaling instead of clipping text.
+// Small owner-drawn control set for the dark UI. Every size goes through Theme.S() so the window
+// follows the Windows display scaling, and every text colour keeps at least 4.5:1 on the surface it
+// sits on (the muted and faint tiers were measured: 6.8:1 and 4.8:1 on the card).
 
 namespace SteamBypass
 {
     static class Theme
     {
-        public static readonly Color Bg = Color.FromArgb(15, 20, 27);
-        public static readonly Color Card = Color.FromArgb(24, 31, 41);
-        public static readonly Color CardBorder = Color.FromArgb(40, 51, 65);
-        public static readonly Color Raised = Color.FromArgb(34, 43, 56);
-        public static readonly Color RaisedHover = Color.FromArgb(44, 56, 72);
-        public static readonly Color Text = Color.FromArgb(232, 237, 243);
-        public static readonly Color Muted = Color.FromArgb(138, 151, 166);
-        public static readonly Color Green = Color.FromArgb(46, 189, 107);
+        // Neutral greys, in line with Windows 11 dark mode. Colour is reserved for state.
+        public static readonly Color Bg = Color.FromArgb(23, 23, 23);
+        public static readonly Color Card = Color.FromArgb(33, 33, 33);
+        public static readonly Color Border = Color.FromArgb(51, 51, 51);
+        public static readonly Color Raised = Color.FromArgb(43, 43, 43);
+        public static readonly Color RaisedHover = Color.FromArgb(54, 54, 54);
+        public static readonly Color Text = Color.FromArgb(243, 243, 243);
+        public static readonly Color Muted = Color.FromArgb(168, 168, 168);   // secondary text, 6.8:1 on Card
+        public static readonly Color Faint = Color.FromArgb(140, 140, 140);   // meta text, 4.8:1 on Card
+        public static readonly Color Stroke = Color.FromArgb(90, 90, 90);     // decoration only, never text
+        public static readonly Color Green = Color.FromArgb(52, 192, 110);    // "the bypass is on" and passed checks
+        public static readonly Color GreenDeep = Color.FromArgb(31, 157, 85); // fill behind white (3.5:1)
         public static readonly Color Amber = Color.FromArgb(229, 169, 59);
-        public static readonly Color Red = Color.FromArgb(235, 90, 82);
-        public static readonly Color Off = Color.FromArgb(91, 103, 118);
+        public static readonly Color Red = Color.FromArgb(240, 96, 90);
+        public static readonly Color Accent = Color.FromArgb(47, 111, 235);   // the product mark only
+
+        // Type scale in points: meta, body, title, value, state.
+        public const float TMeta = 8.5f, TBody = 9.5f, TTitle = 11f, TValue = 15f, TState = 18f;
 
         public static float Scale = 1f;
         public static int S(int v) { return (int)Math.Round(v * Scale); }
@@ -50,23 +58,38 @@ namespace SteamBypass
         }
     }
 
-    // Base class: double buffered, paints its parent's colour behind rounded shapes.
+    // Base class: double buffered, not a Tab stop unless it is something you can operate.
     class Surface : Control
     {
         public Surface()
         {
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer |
                      ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
+            SetStyle(ControlStyles.Selectable, false);
+            TabStop = false;
         }
+
+        protected void Interactive(AccessibleRole role)
+        {
+            SetStyle(ControlStyles.Selectable, true);
+            TabStop = true;
+            Cursor = Cursors.Hand;
+            AccessibleRole = role;
+        }
+
         protected override void OnPaintBackground(PaintEventArgs e)
         {
             e.Graphics.Clear(Parent != null ? Parent.BackColor : Theme.Bg);
         }
+
         protected static void Quality(Graphics g)
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
         }
+
+        protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+        protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
     }
 
     class Card : Surface
@@ -75,9 +98,9 @@ namespace SteamBypass
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics; Quality(g);
-            using (var p = Theme.RoundRect(new RectangleF(0.5f, 0.5f, Width - 1, Height - 1), Theme.S(14)))
+            using (var p = Theme.RoundRect(new RectangleF(0.5f, 0.5f, Width - 1, Height - 1), Theme.S(12)))
             using (var b = new SolidBrush(BackColor))
-            using (var pen = new Pen(Theme.CardBorder))
+            using (var pen = new Pen(Theme.Border))
             {
                 g.FillPath(b, p);
                 g.DrawPath(pen, p);
@@ -85,50 +108,58 @@ namespace SteamBypass
         }
     }
 
+    // The product mark: an open ring (the "gap" in the handshake the bypass slips through) around a dot.
     class Logo : Surface
     {
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics; Quality(g);
             var r = new RectangleF(0, 0, Width, Height);
-            using (var p = Theme.RoundRect(r, Theme.S(11)))
-            using (var b = new LinearGradientBrush(r, Color.FromArgb(54, 136, 230), Color.FromArgb(28, 78, 160), 60f))
+            using (var p = Theme.RoundRect(r, Theme.S(10)))
+            using (var b = new SolidBrush(Theme.Accent))
                 g.FillPath(b, p);
-            using (var f = Theme.Semi(15f))
-            using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                g.DrawString("S", f, Brushes.White, new RectangleF(0, -1, Width, Height), sf);
+            float cx = Width / 2f, cy = Height / 2f, rr = Width * 0.25f;
+            using (var pen = new Pen(Color.White, Theme.S(3f)) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                g.DrawArc(pen, cx - rr, cy - rr, rr * 2, rr * 2, -25, 300);
+            using (var b = new SolidBrush(Color.White))
+                g.FillEllipse(b, cx - Theme.S(2.5f), cy - Theme.S(2.5f), Theme.S(5f), Theme.S(5f));
         }
     }
 
-    // Big round power button; glows and pulses while the bypass is on.
+    // Big round power button. Flat: a filled disc, one ring, a glyph. It eases between states and
+    // then stops its timer, so an idle tray app does no redrawing.
     class PowerButton : Surface
     {
-        bool on;
-        float hover, hoverTarget, phase;
+        public enum Mode { Off, On, Error }
+        Mode mode = Mode.Off;
+        float on, onTarget, hover, hoverTarget;
+        bool down;
         readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
 
         public PowerButton()
         {
-            Cursor = Cursors.Hand;
-            TabStop = true;
-            timer.Interval = 33;
+            Interactive(AccessibleRole.PushButton);
+            timer.Interval = 16;
             timer.Tick += delegate
             {
-                bool moving = Math.Abs(hoverTarget - hover) > 0.01f;
-                if (moving) hover += (hoverTarget - hover) * 0.3f; else hover = hoverTarget;
-                if (on) phase += 0.09f;
-                if (on || moving) Invalidate();
+                bool moving = false;
+                if (Math.Abs(onTarget - on) > 0.01f) { on += (onTarget - on) * 0.28f; moving = true; } else on = onTarget;
+                if (Math.Abs(hoverTarget - hover) > 0.01f) { hover += (hoverTarget - hover) * 0.35f; moving = true; } else hover = hoverTarget;
+                Invalidate();
+                if (!moving) timer.Stop();
             };
-            timer.Start();
         }
 
-        public bool On { get { return on; } set { if (on == value) return; on = value; Invalidate(); } }
+        public Mode State
+        {
+            get { return mode; }
+            set { if (mode == value) return; mode = value; onTarget = value == Mode.On ? 1f : 0f; timer.Start(); Invalidate(); }
+        }
 
-        protected override void OnMouseEnter(EventArgs e) { hoverTarget = 1f; base.OnMouseEnter(e); }
-        protected override void OnMouseLeave(EventArgs e) { hoverTarget = 0f; base.OnMouseLeave(e); }
-        protected override void OnMouseDown(MouseEventArgs e) { Focus(); base.OnMouseDown(e); }
-        protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
-        protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+        protected override void OnMouseEnter(EventArgs e) { hoverTarget = 1f; timer.Start(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hoverTarget = 0f; down = false; timer.Start(); base.OnMouseLeave(e); }
+        protected override void OnMouseDown(MouseEventArgs e) { down = true; Focus(); Invalidate(); base.OnMouseDown(e); }
+        protected override void OnMouseUp(MouseEventArgs e) { down = false; Invalidate(); base.OnMouseUp(e); }
         protected override void OnKeyDown(KeyEventArgs e)
         {
             if (e.KeyCode == Keys.Space || e.KeyCode == Keys.Enter) { OnClick(EventArgs.Empty); e.Handled = true; }
@@ -139,43 +170,30 @@ namespace SteamBypass
         {
             var g = e.Graphics; Quality(g);
             float cx = Width / 2f, cy = Height / 2f;
-            float r = Math.Min(Width, Height) / 2f - Theme.S(16);
+            float r = Math.Min(Width, Height) / 2f - Theme.S(20);
+            if (down) r -= Theme.S(2);
+            bool err = mode == Mode.Error;
 
-            if (on)
-            {
-                float k = 0.65f + 0.35f * (float)Math.Sin(phase);
-                for (int i = 0; i < 7; i++)
-                {
-                    float rr = r + Theme.S(3) + i * Theme.S(4);
-                    int a = (int)(36 * (1 - i / 7f) * k);
-                    using (var b = new SolidBrush(Color.FromArgb(a, Theme.Green)))
-                        g.FillEllipse(b, cx - rr, cy - rr, rr * 2, rr * 2);
-                }
-            }
+            var rest = Theme.Lerp(Theme.Raised, Theme.RaisedHover, hover);
+            var disc = Theme.Lerp(rest, Theme.GreenDeep, on);
+            Color ringCol = err ? Color.FromArgb(150, Theme.Red) : Theme.Lerp(Theme.Border, Color.FromArgb(140, Theme.Green), on);
+            Color glyph = err ? Theme.Red : Theme.Lerp(Theme.Lerp(Theme.Muted, Theme.Text, hover), Color.White, on);
 
-            var rect = new RectangleF(cx - r, cy - r, r * 2, r * 2);
-            if (on)
-                using (var b = new LinearGradientBrush(rect, Color.FromArgb(64, 210, 130), Color.FromArgb(30, 148, 83), 90f))
-                    g.FillEllipse(b, rect);
-            else
-                using (var b = new SolidBrush(Theme.Lerp(Theme.Raised, Theme.RaisedHover, hover)))
-                    g.FillEllipse(b, rect);
-
-            Color ring = on ? Color.FromArgb(110, 255, 255, 255) : Theme.Lerp(Theme.CardBorder, Theme.Off, hover);
-            using (var pen = new Pen(ring, Theme.S(2f))) g.DrawEllipse(pen, rect);
+            float rr = r + Theme.S(9);
+            using (var pen = new Pen(ringCol, Theme.S(2f))) g.DrawEllipse(pen, cx - rr, cy - rr, rr * 2, rr * 2);
+            using (var b = new SolidBrush(disc)) g.FillEllipse(b, cx - r, cy - r, r * 2, r * 2);
 
             float gr = r * 0.36f;
-            Color gc = on ? Color.White : Theme.Lerp(Theme.Muted, Theme.Text, hover);
-            using (var pen = new Pen(gc, Theme.S(5f)) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+            using (var pen = new Pen(glyph, Theme.S(5f)) { StartCap = LineCap.Round, EndCap = LineCap.Round })
             {
                 g.DrawArc(pen, cx - gr, cy - gr, gr * 2, gr * 2, -55, 290);
                 g.DrawLine(pen, cx, cy - gr * 1.25f, cx, cy - gr * 0.1f);
             }
 
-            if (Focused)
-                using (var pen = new Pen(Color.FromArgb(120, Theme.Text), 1f) { DashStyle = DashStyle.Dot })
+            if (Focused && ShowFocusCues)
+                using (var pen = new Pen(Theme.Text, 1f) { DashStyle = DashStyle.Dot })
                 {
-                    float fr = r + Theme.S(8);
+                    float fr = rr + Theme.S(5);
                     g.DrawEllipse(pen, cx - fr, cy - fr, fr * 2, fr * 2);
                 }
         }
@@ -187,6 +205,7 @@ namespace SteamBypass
         }
     }
 
+    // Neutral on-state (near-white track, dark knob) so green keeps meaning "the bypass is on".
     class ToggleSwitch : Surface
     {
         bool on;
@@ -196,8 +215,7 @@ namespace SteamBypass
 
         public ToggleSwitch()
         {
-            Cursor = Cursors.Hand;
-            TabStop = true;
+            Interactive(AccessibleRole.CheckButton);
             timer.Interval = 15;
             timer.Tick += delegate
             {
@@ -215,6 +233,7 @@ namespace SteamBypass
             {
                 if (on == value) return;
                 on = value;
+                AccessibleDescription = on ? "On" : "Off";
                 timer.Start();
                 Invalidate();
                 var h = CheckedChanged;
@@ -222,7 +241,7 @@ namespace SteamBypass
             }
         }
 
-        public void SetCheckedSilently(bool v) { on = v; pos = v ? 1f : 0f; Invalidate(); }
+        public void SetCheckedSilently(bool v) { on = v; pos = v ? 1f : 0f; AccessibleDescription = v ? "On" : "Off"; Invalidate(); }
 
         protected override void OnClick(EventArgs e) { Checked = !Checked; base.OnClick(e); }
         protected override void OnKeyDown(KeyEventArgs e)
@@ -230,25 +249,25 @@ namespace SteamBypass
             if (e.KeyCode == Keys.Space || e.KeyCode == Keys.Enter) { Checked = !Checked; e.Handled = true; }
             base.OnKeyDown(e);
         }
-        protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
-        protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics; Quality(g);
             var tr = new RectangleF(1, 1, Width - 2, Height - 2);
+            var onTrack = Color.FromArgb(230, 230, 230);
             using (var p = Theme.RoundRect(tr, tr.Height / 2f))
-            using (var b = new SolidBrush(Theme.Lerp(Theme.Raised, Theme.Green, pos)))
-            using (var pen = new Pen(Theme.Lerp(Theme.CardBorder, Theme.Green, pos)))
+            using (var b = new SolidBrush(Theme.Lerp(Theme.Raised, onTrack, pos)))
+            using (var pen = new Pen(Theme.Lerp(Theme.Stroke, onTrack, pos)))
             {
                 g.FillPath(b, p);
                 g.DrawPath(pen, p);
             }
-            float d = Height - Theme.S(8);
-            float x = Theme.S(4) + (Width - Theme.S(8) - d) * pos;
-            using (var b = new SolidBrush(Color.White)) g.FillEllipse(b, x, Theme.S(4), d, d);
-            if (Focused)
-                using (var pen = new Pen(Color.FromArgb(150, Theme.Text), 1f) { DashStyle = DashStyle.Dot })
+            float d = Height - Theme.S(10);
+            float x = Theme.S(5) + (Width - Theme.S(10) - d) * pos;
+            using (var b = new SolidBrush(Theme.Lerp(Theme.Muted, Theme.Bg, pos)))
+                g.FillEllipse(b, x, Theme.S(5), d, d);
+            if (Focused && ShowFocusCues)
+                using (var pen = new Pen(Theme.Text, 1f) { DashStyle = DashStyle.Dot })
                     g.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
         }
 
@@ -262,19 +281,14 @@ namespace SteamBypass
     class FlatButton : Surface
     {
         bool hover, down;
-        public FlatButton()
-        {
-            Cursor = Cursors.Hand;
-            TabStop = true;
-        }
+        public bool Compact;
+        public FlatButton() { Interactive(AccessibleRole.PushButton); }
         protected override void OnEnabledChanged(EventArgs e) { Cursor = Enabled ? Cursors.Hand : Cursors.Default; Invalidate(); base.OnEnabledChanged(e); }
-        protected override void OnTextChanged(EventArgs e) { Invalidate(); base.OnTextChanged(e); }
+        protected override void OnTextChanged(EventArgs e) { AccessibleName = Text; Invalidate(); base.OnTextChanged(e); }
         protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
         protected override void OnMouseLeave(EventArgs e) { hover = false; down = false; Invalidate(); base.OnMouseLeave(e); }
         protected override void OnMouseDown(MouseEventArgs e) { down = true; Focus(); Invalidate(); base.OnMouseDown(e); }
         protected override void OnMouseUp(MouseEventArgs e) { down = false; Invalidate(); base.OnMouseUp(e); }
-        protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
-        protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
         protected override void OnKeyDown(KeyEventArgs e)
         {
             if (Enabled && (e.KeyCode == Keys.Space || e.KeyCode == Keys.Enter)) { OnClick(EventArgs.Empty); e.Handled = true; }
@@ -285,49 +299,110 @@ namespace SteamBypass
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics; Quality(g);
-            Color fill = !Enabled ? Theme.Card : down ? Theme.Bg : hover ? Theme.RaisedHover : Theme.Raised;
-            using (var p = Theme.RoundRect(new RectangleF(0.5f, 0.5f, Width - 1, Height - 1), Theme.S(10)))
+            Color fill = !Enabled ? Parent.BackColor : down ? Theme.Bg : hover ? Theme.RaisedHover : Theme.Raised;
+            using (var p = Theme.RoundRect(new RectangleF(0.5f, 0.5f, Width - 1, Height - 1), Theme.S(Compact ? 7 : 9)))
             using (var b = new SolidBrush(fill))
-            using (var pen = new Pen(Focused ? Theme.Off : Theme.CardBorder))
+            using (var pen = new Pen(Focused && ShowFocusCues ? Theme.Muted : Theme.Border))
             {
                 g.FillPath(b, p);
                 g.DrawPath(pen, p);
             }
-            using (var f = Theme.Semi(9.5f))
-            using (var b = new SolidBrush(Enabled ? Theme.Text : Theme.Off))
+            using (var f = Theme.Semi(Compact ? Theme.TMeta + 0.5f : Theme.TBody))
+            using (var b = new SolidBrush(Enabled ? Theme.Text : Theme.Faint))
             using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter })
                 g.DrawString(Text, f, b, new RectangleF(0, 0, Width, Height), sf);
         }
     }
 
-    class StatTile : Surface
+    // A quiet text action (underlines on hover).
+    class TextAction : Surface
     {
-        string value = "-";
-        Color valueColor = Theme.Text;
-        public string Caption = "";
-        public StatTile() { BackColor = Theme.Card; }
-        public string Value { get { return value; } set { if (this.value == value) return; this.value = value; Invalidate(); } }
-        public Color ValueColor { get { return valueColor; } set { if (valueColor == value) return; valueColor = value; Invalidate(); } }
+        bool hover;
+        public TextAction() { Interactive(AccessibleRole.Link); }
+        protected override void OnTextChanged(EventArgs e) { AccessibleName = Text; Invalidate(); base.OnTextChanged(e); }
+        protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hover = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Space || e.KeyCode == Keys.Enter) { OnClick(EventArgs.Empty); e.Handled = true; }
+            base.OnKeyDown(e);
+        }
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics; Quality(g);
+            using (var f = new Font("Segoe UI", Theme.TMeta, hover || (Focused && ShowFocusCues) ? FontStyle.Underline : FontStyle.Regular, GraphicsUnit.Point))
+            using (var b = new SolidBrush(hover ? Theme.Text : Theme.Muted))
+            using (var sf = new StringFormat { Alignment = StringAlignment.Far, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap })
+                g.DrawString(Text, f, b, new RectangleF(0, 0, Width, Height), sf);
+        }
+    }
+
+    // Three figures in one container, split by hairlines (no tile per figure).
+    class StatStrip : Surface
+    {
+        public readonly string[] Captions = { "Active", "Total", "Errors" };
+        readonly string[] values = { "0", "0", "0" };
+        readonly Color[] colors = { Theme.Text, Theme.Text, Theme.Text };
+
+        public StatStrip() { BackColor = Theme.Card; AccessibleRole = AccessibleRole.Grouping; AccessibleName = "Connection statistics"; }
+
+        public void Set(int i, string value, Color color)
+        {
+            if (values[i] == value && colors[i] == color) return;
+            values[i] = value; colors[i] = color;
+            AccessibleDescription = Captions[0] + " " + values[0] + ", " + Captions[1] + " " + values[1] + ", " + Captions[2] + " " + values[2];
+            Invalidate();
+        }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics; Quality(g);
-            using (var p = Theme.RoundRect(new RectangleF(0.5f, 0.5f, Width - 1, Height - 1), Theme.S(12)))
-            using (var b = new SolidBrush(Theme.Card))
-            using (var pen = new Pen(Theme.CardBorder))
-            {
-                g.FillPath(b, p);
-                g.DrawPath(pen, p);
-            }
+            int n = 3;
+            float w = Width / (float)n;
             using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+            using (var fv = Theme.Semi(Theme.TValue))
+            using (var fc = Theme.F(Theme.TMeta))
+            using (var bc = new SolidBrush(Theme.Muted))
+            using (var pen = new Pen(Theme.Border))
             {
-                using (var f = Theme.Semi(15f))
-                using (var b = new SolidBrush(valueColor))
-                    g.DrawString(value, f, b, new RectangleF(0, Theme.S(6), Width, Theme.S(32)), sf);
-                using (var f = Theme.F(8f))
-                using (var b = new SolidBrush(Theme.Muted))
-                    g.DrawString(Caption, f, b, new RectangleF(0, Theme.S(36), Width, Theme.S(18)), sf);
+                for (int i = 0; i < n; i++)
+                {
+                    using (var bv = new SolidBrush(colors[i]))
+                        g.DrawString(values[i], fv, bv, new RectangleF(i * w, Theme.S(10), w, Theme.S(26)), sf);
+                    g.DrawString(Captions[i], fc, bc, new RectangleF(i * w, Theme.S(36), w, Theme.S(18)), sf);
+                    if (i > 0) g.DrawLine(pen, i * w, Theme.S(12), i * w, Height - Theme.S(12));
+                }
             }
+        }
+    }
+
+    // The Steam row: a status dot, the word "Steam" and one line saying how Steam relates to the bypass.
+    class SteamStatus : Surface
+    {
+        string text = "";
+        Color color = Theme.Muted;
+        public SteamStatus() { BackColor = Theme.Card; AccessibleRole = AccessibleRole.StaticText; }
+
+        public void Set(string status, Color c)
+        {
+            if (text == status && color == c) return;
+            text = status; color = c;
+            AccessibleName = "Steam: " + status;
+            Invalidate();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics; Quality(g);
+            float d = Theme.S(8);
+            using (var b = new SolidBrush(color)) g.FillEllipse(b, 0, Theme.S(7), d, d);
+            using (var f = Theme.Semi(Theme.TBody))
+            using (var b = new SolidBrush(Theme.Text))
+                g.DrawString("Steam", f, b, new PointF(Theme.S(18), Theme.S(1)));
+            using (var f = Theme.F(Theme.TMeta))
+            using (var b = new SolidBrush(color))
+            using (var sf = new StringFormat { Trimming = StringTrimming.EllipsisWord })
+                g.DrawString(text, f, b, new RectangleF(Theme.S(18), Theme.S(22), Width - Theme.S(18), Height - Theme.S(22)), sf);
         }
     }
 
@@ -343,8 +418,14 @@ namespace SteamBypass
 
         public CheckRow()
         {
+            AccessibleRole = AccessibleRole.Row;
             spin.Interval = 30;
             spin.Tick += delegate { angle = (angle + 20f) % 360f; Invalidate(); };
+        }
+
+        string StatusText()
+        {
+            return status == St.Idle ? "Not tested" : status == St.Running ? "Testing..." : detail;
         }
 
         public void Set(St s, string text)
@@ -352,6 +433,7 @@ namespace SteamBypass
             status = s;
             detail = text ?? "";
             if (s == St.Running) spin.Start(); else spin.Stop();
+            AccessibleName = Title + ": " + (s == St.Ok ? "reachable, " : s == St.Fail ? "failed, " : "") + StatusText();
             Invalidate();
         }
 
@@ -363,7 +445,7 @@ namespace SteamBypass
             switch (status)
             {
                 case St.Idle:
-                    using (var pen = new Pen(Theme.Off, Theme.S(1.6f))) g.DrawEllipse(pen, ir.X + 1, ir.Y + 1, d - 2, d - 2);
+                    using (var pen = new Pen(Theme.Stroke, Theme.S(1.6f))) g.DrawEllipse(pen, ir.X + 1, ir.Y + 1, d - 2, d - 2);
                     break;
                 case St.Running:
                     using (var pen = new Pen(Color.FromArgb(60, Theme.Amber), Theme.S(2f))) g.DrawEllipse(pen, ir.X + 1, ir.Y + 1, d - 2, d - 2);
@@ -371,14 +453,14 @@ namespace SteamBypass
                         g.DrawArc(pen, ir.X + 1, ir.Y + 1, d - 2, d - 2, angle, 100);
                     break;
                 case St.Ok:
-                    using (var b = new SolidBrush(Theme.Green)) g.FillEllipse(b, ir);
+                    using (var b = new SolidBrush(Theme.GreenDeep)) g.FillEllipse(b, ir);
                     using (var pen = new Pen(Color.White, Theme.S(2f)) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
                         g.DrawLines(pen, new[] {
                             new PointF(ix + d * 0.27f, iy + d * 0.53f), new PointF(ix + d * 0.44f, iy + d * 0.69f), new PointF(ix + d * 0.74f, iy + d * 0.33f) });
                     break;
                 case St.Fail:
                     using (var b = new SolidBrush(Theme.Red)) g.FillEllipse(b, ir);
-                    using (var pen = new Pen(Color.White, Theme.S(2f)) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                    using (var pen = new Pen(Theme.Bg, Theme.S(2f)) { StartCap = LineCap.Round, EndCap = LineCap.Round })
                     {
                         g.DrawLine(pen, ix + d * 0.33f, iy + d * 0.33f, ix + d * 0.67f, iy + d * 0.67f);
                         g.DrawLine(pen, ix + d * 0.67f, iy + d * 0.33f, ix + d * 0.33f, iy + d * 0.67f);
@@ -387,27 +469,167 @@ namespace SteamBypass
             }
 
             float tx = Theme.S(34);
-            float rightW = Width * 0.42f;
-            using (var f = Theme.F(9.5f))
+            float rightW = Width * 0.40f;
+            using (var f = Theme.F(Theme.TBody))
             using (var b = new SolidBrush(Theme.Text))
             using (var sf = new StringFormat { Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap })
                 g.DrawString(Title, f, b, new RectangleF(tx, Theme.S(2), Width - tx - rightW, Theme.S(18)), sf);
-            using (var f = Theme.F(8f))
-            using (var b = new SolidBrush(Theme.Muted))
+            using (var f = Theme.F(Theme.TMeta))
+            using (var b = new SolidBrush(Theme.Faint))
             using (var sf = new StringFormat { Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap })
-                g.DrawString(Subtitle, f, b, new RectangleF(tx, Theme.S(18), Width - tx - rightW, Theme.S(16)), sf);
+                g.DrawString(Subtitle, f, b, new RectangleF(tx, Theme.S(19), Width - tx - rightW, Theme.S(16)), sf);
 
-            Color dc = status == St.Ok ? Theme.Green : status == St.Fail ? Theme.Red : status == St.Running ? Theme.Amber : Theme.Muted;
-            string txt = status == St.Idle ? "Not tested" : status == St.Running ? "Testing..." : detail;
-            using (var f = Theme.F(8.5f))
+            Color dc = status == St.Ok ? Theme.Green : status == St.Fail ? Theme.Red : status == St.Running ? Theme.Amber : Theme.Faint;
+            using (var f = Theme.F(Theme.TMeta))
             using (var b = new SolidBrush(dc))
             using (var sf = new StringFormat { Alignment = StringAlignment.Far, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap })
-                g.DrawString(txt, f, b, new RectangleF(Width - rightW, 0, rightW, Height), sf);
+                g.DrawString(StatusText(), f, b, new RectangleF(Width - rightW, 0, rightW, Height), sf);
         }
 
         protected override void Dispose(bool disposing)
         {
             if (disposing) spin.Dispose();
+            base.Dispose(disposing);
+        }
+    }
+
+    internal enum ToastKind { Info, Success, Warning, Error }
+
+    // On-screen notice, drawn by the app instead of the Windows tray balloon (which Focus Assist
+    // swallows and the OS restyles). Borderless, always on top, never takes focus, lets clicks fall
+    // through, fades in and out, and sizes itself to its text. Warnings and errors stay longer.
+    internal sealed class Toast : Form
+    {
+        static Toast current;
+        const int FadeIn = 140, FadeOut = 220;
+
+        readonly string title, detail;
+        readonly ToastKind kind;
+        readonly Rectangle titleRect, detailRect;
+        readonly int holdMs;
+        readonly DateTime started = DateTime.Now;
+        readonly System.Windows.Forms.Timer anim = new System.Windows.Forms.Timer();
+
+        // Call on the UI thread. Replaces a notice that is still showing.
+        public static Toast Flash(string title, string detail, ToastKind kind)
+        {
+            try
+            {
+                if (current != null && !current.IsDisposed) current.Close();
+                current = new Toast(title, detail ?? "", kind);
+                current.Show();
+                return current;
+            }
+            catch { return null; }
+        }
+
+        Toast(string title, string detail, ToastKind kind)
+        {
+            this.title = title;
+            this.detail = detail;
+            this.kind = kind;
+            holdMs = kind == ToastKind.Error ? 6000 : kind == ToastKind.Warning ? 5000 : 2600;
+
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            TopMost = true;
+            StartPosition = FormStartPosition.Manual;
+            BackColor = Theme.Raised;
+            Opacity = 0;
+
+            int width = Theme.S(420), left = Theme.S(52), textW = width - left - Theme.S(18);
+            int detailH = 0;
+            if (detail.Length > 0)
+                using (var f = Theme.F(Theme.TBody))
+                {
+                    var m = TextRenderer.MeasureText(detail, f, new Size(textW, 0), TextFormatFlags.WordBreak | TextFormatFlags.NoPadding);
+                    detailH = Math.Min(m.Height, f.Height * 2 + 2);
+                }
+            int height = Theme.S(14) + Theme.S(22) + (detailH > 0 ? Theme.S(2) + detailH : 0) + Theme.S(14);
+            titleRect = new Rectangle(left, Theme.S(14), textW, Theme.S(22));
+            detailRect = new Rectangle(left, Theme.S(38), textW, detailH);
+            Size = new Size(width, height);
+
+            Rectangle wa = Screen.FromPoint(Cursor.Position).WorkingArea;
+            Location = new Point(wa.Left + (wa.Width - Width) / 2, wa.Bottom - Height - Theme.S(56));
+            using (var p = Theme.RoundRect(new RectangleF(0, 0, Width, Height), Theme.S(12)))
+                Region = new Region(p);
+
+            anim.Interval = 16;
+            anim.Tick += delegate
+            {
+                double t = (DateTime.Now - started).TotalMilliseconds;
+                if (t < FadeIn) Opacity = t / FadeIn;
+                else if (t < FadeIn + holdMs) Opacity = 1;
+                else if (t < FadeIn + holdMs + FadeOut) Opacity = 1 - (t - FadeIn - holdMs) / FadeOut;
+                else { anim.Stop(); Close(); }
+            };
+            Shown += delegate { anim.Start(); };
+        }
+
+        protected override bool ShowWithoutActivation { get { return true; } }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= 0x08000000 | 0x00000080 | 0x00000020;   // no-activate, tool window (no Alt-Tab entry), click-through
+                return cp;
+            }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.Clear(Theme.Raised);
+            using (var p = Theme.RoundRect(new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f), Theme.S(12)))
+            using (var pen = new Pen(Theme.Stroke))
+                g.DrawPath(pen, p);
+
+            float d = Theme.S(22), ix = Theme.S(16), iy = (Height - d) / 2f;
+            var ir = new RectangleF(ix, iy, d, d);
+            Color fill = kind == ToastKind.Success ? Theme.GreenDeep : kind == ToastKind.Error ? Theme.Red : kind == ToastKind.Warning ? Theme.Amber : Theme.Stroke;
+            using (var b = new SolidBrush(fill)) g.FillEllipse(b, ir);
+            Color mark = kind == ToastKind.Success || kind == ToastKind.Info ? Color.White : Theme.Bg;
+            using (var pen = new Pen(mark, Theme.S(2.2f)) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
+            using (var b = new SolidBrush(mark))
+            {
+                switch (kind)
+                {
+                    case ToastKind.Success:
+                        g.DrawLines(pen, new[] { new PointF(ix + d * 0.27f, iy + d * 0.53f), new PointF(ix + d * 0.44f, iy + d * 0.69f), new PointF(ix + d * 0.74f, iy + d * 0.33f) });
+                        break;
+                    case ToastKind.Error:
+                        g.DrawLine(pen, ix + d * 0.33f, iy + d * 0.33f, ix + d * 0.67f, iy + d * 0.67f);
+                        g.DrawLine(pen, ix + d * 0.67f, iy + d * 0.33f, ix + d * 0.33f, iy + d * 0.67f);
+                        break;
+                    case ToastKind.Warning:
+                        g.DrawLine(pen, ix + d * 0.5f, iy + d * 0.25f, ix + d * 0.5f, iy + d * 0.57f);
+                        g.FillEllipse(b, ix + d * 0.5f - Theme.S(1.4f), iy + d * 0.72f - Theme.S(1.4f), Theme.S(2.8f), Theme.S(2.8f));
+                        break;
+                    default:
+                        g.DrawLine(pen, ix + d * 0.5f, iy + d * 0.45f, ix + d * 0.5f, iy + d * 0.72f);
+                        g.FillEllipse(b, ix + d * 0.5f - Theme.S(1.4f), iy + d * 0.28f - Theme.S(1.4f), Theme.S(2.8f), Theme.S(2.8f));
+                        break;
+                }
+            }
+
+            using (var f = Theme.Semi(Theme.TTitle))
+                TextRenderer.DrawText(g, title, f, titleRect, Theme.Text,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+            if (detailRect.Height > 0)
+                using (var f = Theme.F(Theme.TBody))
+                    TextRenderer.DrawText(g, detail, f, detailRect, Theme.Muted,
+                        TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) anim.Dispose();
+            if (current == this) current = null;
             base.Dispose(disposing);
         }
     }

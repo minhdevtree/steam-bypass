@@ -1,5 +1,6 @@
-# build output
+# build output and local dev files
 SteamBypass.exe
+dist/
 
 # runtime files
 steam-bypass.log

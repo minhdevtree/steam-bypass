@@ -9,6 +9,14 @@ A small Windows tray app that restores access to Steam (store, community, login 
 
 > Written and tested against the Steam restrictions seen in Vietnam in October 2026. Other networks may block differently, so see [How it was investigated](#how-it-was-investigated) to check what yours does.
 
+<p align="center">
+  <img src="docs/window-on.png" alt="Steam Bypass window with the bypass on: the power button is green, the connection check shows four passed services" width="49%">
+  <img src="docs/window-off.png" alt="Steam Bypass window with the bypass off" width="49%">
+</p>
+<p align="center">
+  <img src="docs/notice.png" alt="The on-screen notice that confirms the bypass is on" width="40%">
+</p>
+
 ## Contents
 
 - [How Steam is being blocked](#how-steam-is-being-blocked)
@@ -101,6 +109,8 @@ Ports `127.0.0.1:18081` and `127.0.0.1:80` must be free. Stop any local web serv
 | Exit (tray menu) | Turn the bypass off, restore Windows proxy settings, quit |
 | *Turn on when app starts* | Enables the bypass as soon as the app launches |
 | *Start with Windows* | Adds a `HKCU\...\Run` entry that launches `SteamBypass.exe --tray` at logon |
+
+When the window is not in front (you used the tray menu, or the app turned itself on at sign-in), a small **on-screen notice** appears at the bottom of the screen, for example "Bypass is on" or "Steam is already open". It is drawn by the app instead of the Windows tray balloon, so Focus Assist cannot swallow it; it never takes focus, ignores clicks, and stays longer for warnings and errors.
 
 Game downloads only work **while the app is running with the bypass on**. Steam's downloader depends on it.
 
@@ -196,7 +206,7 @@ and `Get-NetTCPConnection` showed the client stuck in `SynSent` to `127.0.0.1:80
 | Steam shows `NO CONNECTION`, the store says "error communicating with the Steam servers", or *Add to Account* does nothing | Steam was started before the bypass was turned on. Use **tray menu → Restart Steam** (or exit Steam and start it again while the bypass is ON). |
 | Steam downloads stay at `0 B/s` | Make sure the app is **ON**, then restart Steam or press the retry button on the stalled download. Check that `Resolve-DnsName cache8-hkg1.steamcontent.com` returns `127.0.0.1` (your DNS must be the ISP one). |
 | A browser still cannot reach Steam | Reload after turning ON. Browsers cache PAC results briefly; if needed, restart it. |
-| Windows Defender quarantines `SteamBypass.exe` (for example `Trojan:Win32/Bearfoos.A!ml`) | A generic machine-learning detection (the `!ml` suffix), not a known-malware signature. The `.exe` is unsigned, opens local sockets, edits the per-user proxy setting and can add a `Run` entry, which is the profile such heuristics dislike. Read the source (about 1,400 lines in `app/`) and build it yourself before trusting it. If you do, add an exclusion for the project folder in *Windows Security → Virus & threat protection → Manage settings → Exclusions*, and consider [reporting the false positive to Microsoft](https://www.microsoft.com/wdsi/filesubmission). Defender also removes the *Start with Windows* entry when it quarantines the file, so re-enable that switch afterwards. |
+| Windows Defender quarantines `SteamBypass.exe` (for example `Trojan:Win32/Bearfoos.A!ml`) | A generic machine-learning detection (the `!ml` suffix), not a known-malware signature. The `.exe` is unsigned, opens local sockets, edits the per-user proxy setting and can add a `Run` entry, which is the profile such heuristics dislike. Read the source (about 1,800 lines in `app/`) and build it yourself before trusting it. If you do, add an exclusion for the project folder in *Windows Security → Virus & threat protection → Manage settings → Exclusions*, and consider [reporting the false positive to Microsoft](https://www.microsoft.com/wdsi/filesubmission). Defender also removes the *Start with Windows* entry when it quarantines the file, so re-enable that switch afterwards. |
 
 Runtime log: `steam-bypass.log`. Settings: `settings.ini` (just `AutoOn=0|1`). Windows registry touched: `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings\AutoConfigURL` and, if enabled, `HKCU\...\Run\SteamBypass`.
 

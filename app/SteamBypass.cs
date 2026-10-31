@@ -238,7 +238,9 @@ namespace SteamBypass
     {
         public const int Port = 18081;
         public int Active, Total, Failed;
-        public Action<string> Log = delegate { };
+        public Action<string> Log = delegate { };       // events worth showing to the user
+        public Action<string> Verbose = delegate { };   // per-host detail, for the log file only
+        public string DownloadsError;                   // why game downloads cannot work (127.0.0.1:80 unavailable), or null
 
         readonly DomainSet steam;
         readonly Resolver resolver = new Resolver();
@@ -261,11 +263,13 @@ namespace SteamBypass
             {
                 listenerHttp = new TcpListener(IPAddress.Loopback, 80);
                 listenerHttp.Start();
+                DownloadsError = null;
                 Task.Run(new Func<Task>(AcceptLoopHttp));
             }
             catch (Exception ex)
             {
                 listenerHttp = null;
+                DownloadsError = "Port 80 is in use by another program, so game downloads will not work.";
                 Log("WARNING: cannot listen on 127.0.0.1:80 (" + ex.Message + "). Game downloads will not work.");
             }
         }
@@ -291,7 +295,7 @@ namespace SteamBypass
         void Note(string host, string what)
         {
             lock (seen) { if (!seen.Add(host + what)) return; }
-            Log(host + "  " + what);
+            Verbose(host + "  " + what);
         }
 
         async Task Handle(TcpClient client)
