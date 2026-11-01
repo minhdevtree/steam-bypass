@@ -219,6 +219,9 @@ app/Controls.cs      Owner-drawn dark UI controls (power button, toggle switch, 
 app/app.manifest     Runs as the invoking user (no elevation), DPI aware
 app/build.bat        Builds ..\SteamBypass.exe with the built-in .NET Framework compiler
 steam-domains.txt    Domains routed through the proxy
+tools/               Dev helpers: preview.ps1 (renders every UI state to PNG), ui-probe.ps1 (screenshot and click the
+                     running window without the real screen or mouse), push.ps1 (publish files to GitHub)
+.claude/skills/steam-bypass/   Notes for coding agents: architecture, code map, how Steam is blocked, testing, releasing
 ```
 
 ## Disclaimer
