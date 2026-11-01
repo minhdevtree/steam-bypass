@@ -17,6 +17,10 @@ public) through the GitHub API with `tools\push.ps1`; releases use `gh release`.
 .\tools\push.ps1 -Message "Remove an old screenshot" -Delete docs\old.png
 ```
 
+Call it directly from the PowerShell session (`& .\tools\push.ps1 -Message $msg -Files $list`). Launching it as
+`powershell -File .\tools\push.ps1 ... -Files a,b` fails with "A positional parameter cannot be found", because `-File`
+does not pass arrays.
+
 One commit on `main` with exactly those files; the `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>` trailer is
 appended when missing. The script refuses to publish a text file containing the author's local paths or account
 names. Output is `pushed <sha> to <repo>`; verify with
